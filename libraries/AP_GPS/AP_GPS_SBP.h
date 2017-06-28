@@ -148,6 +148,8 @@ private:
         uint32_t num_hypotheses;
     };
 
+    uint32_t _abs_gps_diff(const uint16_t week_a, const uint32_t tow_a, const uint16_t week_b, const uint32_t tow_b) const;
+
     void _init_structs();
     void _sbp_process();
     void _sbp_process_message();

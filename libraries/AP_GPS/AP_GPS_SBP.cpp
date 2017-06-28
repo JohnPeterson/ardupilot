@@ -32,6 +32,7 @@ extern const AP_HAL::HAL& hal;
 
 #define SBP_TIMEOUT_HEATBEAT  4000
 #define SBP_TIMEOUT_PVT       500
+#define SBP_TIMEOUT_POS_VEL_DELTA 1000
 #define SBP_TIMEOUT_RTK       200 // how many ms to allow to elapse before switching from RTK to SPP
 #define SBP_FIX_SPP           0
 #define SBP_FIX_RTK_FLOAT     2   // Note that MSG_POS_LLH specifically has them reversed
@@ -258,7 +259,10 @@ AP_GPS_SBP::_sbp_process_message() {
                                                      ((last_gps_time.wn > last_pos_update_week) && (pos_llh->tow < last_pos_update_tow))))) {
                 last_pos_llh = *pos_llh;
             }*/
-            last_pos_llh = *pos_llh;
+            if ((pos_llh->flags == SBP_FIX_RTK_FLOAT) || (pos_llh->flags == SBP_FIX_RTK_FIXED))
+            {
+                last_pos_llh = *pos_llh;
+            }
             break;
         }
 
@@ -370,12 +374,18 @@ AP_GPS_SBP::_attempt_state_update()
                 state.time_week = last_pos_update_week;
                 state.time_week_ms = last_pos_update_tow;
                 state.num_sats = last_pos_llh.n_sats;
+
             }
 
-            last_full_update_cpu_ms = now;
-            logging_log_full_update();
             // assume we don't want to return true unless both velocity and position are valid
-            ret = ((last_pos_update_week > 0) && (last_vel_update_week > 0) && (last_dop_update_week > 0));
+            ret = ((last_pos_update_tow > 0) && (last_vel_update_tow > 0) && (last_dop_update_tow > 0));
+
+            // doesn't count as an update unless we are in sync
+            if (ret && _abs_gps_diff(last_pos_update_week, last_pos_update_tow, last_vel_update_week, last_vel_update_tow) < SBP_TIMEOUT_POS_VEL_DELTA)
+            {
+                last_full_update_cpu_ms = now;
+                logging_log_full_update();
+            }
         }
     }
 
@@ -391,7 +401,21 @@ AP_GPS_SBP::_attempt_state_update()
 
 }
 
-
+uint32_t
+AP_GPS_SBP::_abs_gps_diff(const uint16_t week_a, const uint32_t tow_a, const uint16_t week_b, const uint32_t tow_b) const
+{
+    if (week_a == week_b) {
+        if (tow_a > tow_b) {
+            return tow_a - tow_b;
+        } else {
+            return tow_b - tow_a;
+        }
+    } else if (week_a > week_b) {
+        return (((uint32_t) week_a - ((uint32_t) week_b + 1)) * 604800000) + (UINT32_MAX - tow_b) + tow_a; // number of ms in a week, 7 * 24 * 60 * 60 * 1000
+    } else { // week_a < week_b
+        return (((uint32_t) week_b - ((uint32_t) week_a + 1)) * 604800000) + (UINT32_MAX - tow_a) + tow_b;
+    } 
+}
 
 bool
 AP_GPS_SBP::_detect(struct SBP_detect_state &state, uint8_t data)
