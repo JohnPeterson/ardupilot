@@ -148,6 +148,7 @@ private:
         uint32_t num_hypotheses;
     };
 
+    void _init_structs();
     void _sbp_process();
     void _sbp_process_message();
     bool _attempt_state_update();
@@ -160,12 +161,16 @@ private:
 
     struct sbp_gps_time_t last_gps_time;
     struct sbp_dops_t     last_dops;
-    struct sbp_pos_llh_t  last_pos_llh_spp;
-    struct sbp_pos_llh_t  last_pos_llh_rtk;
+    struct sbp_pos_llh_t  last_pos_llh;
     struct sbp_vel_ned_t  last_vel_ned;
     uint32_t              last_iar_num_hypotheses;
 
-    uint32_t              last_full_update_tow;
+    uint16_t              last_pos_update_week;
+    uint32_t              last_pos_update_tow;
+    uint16_t              last_vel_update_week;
+    uint32_t              last_vel_update_tow;
+    uint16_t              last_dop_update_week;
+    uint32_t              last_dop_update_tow;
     uint32_t              last_full_update_cpu_ms;
 
     // ************************************************************************

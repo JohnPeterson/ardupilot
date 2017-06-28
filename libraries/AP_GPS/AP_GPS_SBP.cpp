@@ -23,6 +23,7 @@
 #include "AP_GPS.h"
 #include "AP_GPS_SBP.h"
 #include <DataFlash/DataFlash.h>
+#include <cstdint>
 
 extern const AP_HAL::HAL& hal;
 
@@ -31,6 +32,10 @@ extern const AP_HAL::HAL& hal;
 
 #define SBP_TIMEOUT_HEATBEAT  4000
 #define SBP_TIMEOUT_PVT       500
+#define SBP_TIMEOUT_RTK       200 // how many ms to allow to elapse before switching from RTK to SPP
+#define SBP_FIX_SPP           0
+#define SBP_FIX_RTK_FLOAT     2   // Note that MSG_POS_LLH specifically has them reversed
+#define SBP_FIX_RTK_FIXED     1   // compared to the MSG_POS_ECEF
 
 #if SBP_DEBUGGING
  # define Debug(fmt, args ...)                  \
@@ -50,11 +55,16 @@ AP_GPS_SBP::AP_GPS_SBP(AP_GPS &_gps, AP_GPS::GPS_State &_state,
 
     last_injected_data_ms(0),
     last_iar_num_hypotheses(0),
-    last_full_update_tow(0),
+    last_pos_update_week(0),
+    last_pos_update_tow(0),
+    last_vel_update_week(0),
+    last_vel_update_tow(0),
+    last_dop_update_week(0),
+    last_dop_update_tow(0),
     last_full_update_cpu_ms(0),
     crc_error_counter(0)
 {
-
+    _init_structs();
     Debug("SBP Driver Initialized");
 
     parser_state.state = sbp_parser_state_t::WAITING;
@@ -63,6 +73,43 @@ AP_GPS_SBP::AP_GPS_SBP(AP_GPS &_gps, AP_GPS::GPS_State &_state,
     state.status = AP_GPS::NO_FIX;
     state.last_gps_time_ms = last_heatbeat_received_ms = AP_HAL::millis();
 
+}
+
+void AP_GPS_SBP::_init_structs()
+{
+    // sbp_gps_time_t
+    last_gps_time.wn = 0;
+    last_gps_time.tow = 0;
+    last_gps_time.ns = 0;
+    last_gps_time.flags = 0;
+
+    // sbp_dops_t
+    last_dops.tow = 0;
+    last_dops.gdop = UINT16_MAX;
+    last_dops.pdop = UINT16_MAX;
+    last_dops.tdop = UINT16_MAX;
+    last_dops.hdop = UINT16_MAX;
+    last_dops.vdop = UINT16_MAX;
+
+    // sbp_pos_llh_t
+    last_pos_llh.tow = 0;
+    last_pos_llh.lat = 0.0;
+    last_pos_llh.lon = 0.0;
+    last_pos_llh.height = 0.0;
+    last_pos_llh.h_accuracy = UINT16_MAX;
+    last_pos_llh.v_accuracy = UINT16_MAX;
+    last_pos_llh.n_sats = 0;
+    last_pos_llh.flags = 0;
+
+    // sbp_vel_ned_t
+    last_vel_ned.tow = 0;
+    last_vel_ned.n = 0;
+    last_vel_ned.e = 0;
+    last_vel_ned.d = 0;
+    last_vel_ned.h_accuracy = UINT16_MAX;
+    last_vel_ned.v_accuracy = UINT16_MAX;
+    last_vel_ned.n_sats = 0;
+    last_vel_ned.flags = 0;
 }
 
 // Process all bytes available from the stream
@@ -195,13 +242,21 @@ AP_GPS_SBP::_sbp_process_message() {
             break;
 
         case SBP_POS_LLH_MSGTYPE: {
+            // because we receive both spp and rtk messages while in rtk float and fix
+            // we need to ignore the spp messages if they aren't too much newer than rtk messages
+
+            // 1. if the incoming fix is RTK Float or Fix, we want it
+            // 2. if both this fix and the last fix are spp, then we want it
+            //    this should also trigger if the last fix hasn't been initialized
+            //    in which case its default value of 0 should still match
+            // 3. If this fix is spp and the last fix is RTK, we should wait for a timeout
+            //    before replacing it
             struct sbp_pos_llh_t *pos_llh = (struct sbp_pos_llh_t*)parser_state.msg_buff;
-            // Check if this is a single point or RTK solution
-            // flags = 0 -> single point
-            if (pos_llh->flags == 0) {
-                last_pos_llh_spp = *pos_llh;
-            } else if (pos_llh->flags == 1 || pos_llh->flags == 2) {
-                last_pos_llh_rtk = *pos_llh;
+            if ((pos_llh->flags == SBP_FIX_RTK_FLOAT) || (pos_llh->flags == SBP_FIX_RTK_FIXED) ||
+                ((pos_llh->flags == SBP_FIX_SPP) && ((pos_llh->flags == last_pos_llh.flags) ||
+                                                     (pos_llh->tow >= last_pos_update_tow + SBP_TIMEOUT_RTK) ||
+                                                     ((last_gps_time.wn > last_pos_update_week) && (pos_llh->tow < last_pos_update_tow))))) {
+                last_pos_llh = *pos_llh;
             }
             break;
         }
@@ -246,63 +301,88 @@ AP_GPS_SBP::_attempt_state_update()
 
         state.status = AP_GPS::NO_FIX;
         Debug("No Heartbeats from Piksi! Driver Ready to Die!");
+    } else {
+        // update components if required
+        bool updated = false;
 
-    } else if (last_pos_llh_rtk.tow == last_vel_ned.tow
-            && abs((int32_t) (last_gps_time.tow - last_vel_ned.tow)) < 10000
-            && abs((int32_t) (last_dops.tow - last_vel_ned.tow)) < 60000
-            && last_vel_ned.tow > last_full_update_tow) {
+        // update position if neccessary
+        // note we handle wrapping of time of week
+        // if the week increases, we expect the tow to wrap to 0, if it hasn't yet,
+        // then we haven't gotten an updated message yet
+        if ((last_pos_llh.tow > last_pos_update_tow) ||
+            ((last_gps_time.wn > last_pos_update_week) && (last_pos_llh.tow < last_pos_update_tow))) {
+            state.location.lat = (int32_t) (last_pos_llh.lat * (double)1e7);
+            state.location.lng = (int32_t) (last_pos_llh.lon * (double)1e7);
+            state.location.alt = (int32_t) (last_pos_llh.height * 100);
 
-        // Use the RTK position
-        sbp_pos_llh_t *pos_llh = &last_pos_llh_rtk;
+            // it appears that the fix status is only encoded in position messages
+            // note that there is no code that indicates no fix, we simply won't receive messages
+            if (last_pos_llh.flags == SBP_FIX_SPP) {
+                state.status = AP_GPS::GPS_OK_FIX_3D;
+            } else if (last_pos_llh.flags == SBP_FIX_RTK_FLOAT) {
+                state.status = AP_GPS::GPS_OK_FIX_3D_RTK_FLOAT;
+            } else if (last_pos_llh.flags == SBP_FIX_RTK_FIXED) {
+                state.status = AP_GPS::GPS_OK_FIX_3D_RTK_FIXED;
+            }
 
-        // Update time state
-        state.time_week         = last_gps_time.wn;
-        state.time_week_ms      = last_vel_ned.tow;
-
-        state.hdop              = last_dops.hdop;
-
-        // Update velocity state
-        state.velocity[0]       = (float)(last_vel_ned.n * 1.0e-3);
-        state.velocity[1]       = (float)(last_vel_ned.e * 1.0e-3);
-        state.velocity[2]       = (float)(last_vel_ned.d * 1.0e-3);
-        state.have_vertical_velocity = true;
-
-        float ground_vector_sq = state.velocity[0]*state.velocity[0] + state.velocity[1]*state.velocity[1];
-        state.ground_speed = safe_sqrt(ground_vector_sq);
-
-        state.ground_course = wrap_360(degrees(atan2f(state.velocity[1], state.velocity[0])));
-
-        // Update position state
-
-        state.location.lat      = (int32_t) (pos_llh->lat * (double)1e7);
-        state.location.lng      = (int32_t) (pos_llh->lon * (double)1e7);
-        state.location.alt      = (int32_t) (pos_llh->height * 100);
-        state.num_sats          = pos_llh->n_sats;
-
-        if (pos_llh->flags == 0) {
-            state.status = AP_GPS::GPS_OK_FIX_3D;
-        } else if (pos_llh->flags == 2) {
-            state.status = AP_GPS::GPS_OK_FIX_3D_RTK_FLOAT;
-        } else if (pos_llh->flags == 1) {
-            state.status = AP_GPS::GPS_OK_FIX_3D_RTK_FIXED;
+            // time is split between gps time and position message
+            last_pos_update_week = last_gps_time.wn;
+            last_pos_update_tow = last_pos_llh.tow;
+            updated = true;
         }
 
-        last_full_update_tow = last_vel_ned.tow;
-        last_full_update_cpu_ms = now;
+        // update velocity if neccessary
+        if ((last_vel_ned.tow > last_vel_update_tow) ||
+            ((last_gps_time.wn > last_vel_update_week) && (last_vel_ned.tow < last_vel_update_tow))) {
+            state.velocity[0] = (float)(last_vel_ned.n * 1.0e-3);
+            state.velocity[1] = (float)(last_vel_ned.e * 1.0e-3);
+            state.velocity[2] = (float)(last_vel_ned.d * 1.0e-3);
+            state.have_vertical_velocity = true;
 
-        logging_log_full_update();
-        ret = true;
+            float ground_vector_sq = state.velocity[0]*state.velocity[0] + state.velocity[1]*state.velocity[1];
+            state.ground_speed = safe_sqrt(ground_vector_sq);
 
-    } else if (now - last_full_update_cpu_ms > SBP_TIMEOUT_PVT) {
+            state.ground_course = wrap_360(degrees(atan2f(state.velocity[1], state.velocity[0])));
+            last_vel_update_week = last_gps_time.wn;
+            last_vel_update_tow = last_vel_ned.tow;
+            updated = true;
+        }
 
+        // update hdop if neccessary
+        if ((last_dops.tow > last_dop_update_tow) ||
+            ((last_gps_time.wn > last_dop_update_week) && (last_dops.tow < last_dop_update_tow))) {
+            state.hdop = last_dops.hdop;
+            last_dop_update_week = last_gps_time.wn;
+            last_dop_update_tow = last_dops.tow;
+            updated = true;
+        }
+
+        // update time - use the current gps time of week and which ever is newest, position or velocity
+        if (updated) {
+            state.time_week = last_vel_update_week;
+            state.time_week_ms = last_vel_update_tow;
+            state.num_sats = last_vel_ned.n_sats; // number of satelites is encoded in both velocity and position
+            // so we will use the most recent one
+
+            if ((last_pos_update_tow > last_vel_update_tow) || (last_pos_update_week > last_vel_update_week))
+            {
+                state.time_week = last_pos_update_week;
+                state.time_week_ms = last_pos_update_tow;
+                state.num_sats = last_pos_llh.n_sats;
+            }
+
+            last_full_update_cpu_ms = now;
+            logging_log_full_update();
+            // assume we don't want to return true unless both velocity and position are valid
+            ret = ((last_pos_update_week > 0) && (last_vel_update_week > 0) && (last_dop_update_week > 0));
+        }
+    }
+
+    if (now - last_full_update_cpu_ms > SBP_TIMEOUT_PVT) {
         //INVARIANT: If we currently have a fix, ONLY return true after a full update.
 
         state.status = AP_GPS::NO_FIX;
         ret = true;
-
-    } else {
-
-        //No timeouts yet, no data yet, nothing has happened.
 
     }
 
