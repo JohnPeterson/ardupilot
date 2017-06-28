@@ -32,7 +32,6 @@ extern const AP_HAL::HAL& hal;
 
 #define SBP_TIMEOUT_HEATBEAT  4000
 #define SBP_TIMEOUT_PVT       500
-#define SBP_TIMEOUT_POS_VEL_DELTA 1000
 #define SBP_TIMEOUT_RTK       200 // how many ms to allow to elapse before switching from RTK to SPP
 #define SBP_FIX_SPP           0
 #define SBP_FIX_RTK_FLOAT     2   // Note that MSG_POS_LLH specifically has them reversed
@@ -330,6 +329,11 @@ AP_GPS_SBP::_attempt_state_update()
                 state.status = AP_GPS::GPS_OK_FIX_3D_RTK_FIXED;
             }
 
+            // we will only time out on positoin messages
+            // it seems that the velocity messages are far less frequent
+            last_full_update_cpu_ms = now;
+            logging_log_full_update();
+
             // time is split between gps time and position message
             last_pos_update_week = last_gps_time.wn;
             last_pos_update_tow = last_pos_llh.tow;
@@ -374,18 +378,10 @@ AP_GPS_SBP::_attempt_state_update()
                 state.time_week = last_pos_update_week;
                 state.time_week_ms = last_pos_update_tow;
                 state.num_sats = last_pos_llh.n_sats;
-
             }
 
             // assume we don't want to return true unless both velocity and position are valid
             ret = ((last_pos_update_tow > 0) && (last_vel_update_tow > 0) && (last_dop_update_tow > 0));
-
-            // doesn't count as an update unless we are in sync
-            if (ret && _abs_gps_diff(last_pos_update_week, last_pos_update_tow, last_vel_update_week, last_vel_update_tow) < SBP_TIMEOUT_POS_VEL_DELTA)
-            {
-                last_full_update_cpu_ms = now;
-                logging_log_full_update();
-            }
         }
     }
 
