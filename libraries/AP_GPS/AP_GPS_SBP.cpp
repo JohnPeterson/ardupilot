@@ -252,12 +252,13 @@ AP_GPS_SBP::_sbp_process_message() {
             // 3. If this fix is spp and the last fix is RTK, we should wait for a timeout
             //    before replacing it
             struct sbp_pos_llh_t *pos_llh = (struct sbp_pos_llh_t*)parser_state.msg_buff;
-            if ((pos_llh->flags == SBP_FIX_RTK_FLOAT) || (pos_llh->flags == SBP_FIX_RTK_FIXED) ||
+            /*if ((pos_llh->flags == SBP_FIX_RTK_FLOAT) || (pos_llh->flags == SBP_FIX_RTK_FIXED) ||
                 ((pos_llh->flags == SBP_FIX_SPP) && ((pos_llh->flags == last_pos_llh.flags) ||
                                                      (pos_llh->tow >= last_pos_update_tow + SBP_TIMEOUT_RTK) ||
                                                      ((last_gps_time.wn > last_pos_update_week) && (pos_llh->tow < last_pos_update_tow))))) {
                 last_pos_llh = *pos_llh;
-            }
+            }*/
+            last_pos_llh = *pos_llh;
             break;
         }
 
