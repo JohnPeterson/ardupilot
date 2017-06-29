@@ -24,6 +24,41 @@
 #include "AP_GPS.h"
 #include "GPS_Backend.h"
 
+#define GPS_BUFFER_MAX_SIZE 20
+
+// Geodetic position solution.
+struct PACKED sbp_pos_llh_t {
+    uint32_t tow;         //< GPS Time of Week (unit: ms)
+    double lat;           //< Latitude (unit: degrees)
+    double lon;           //< Longitude (unit: degrees)
+    double height;        //< Height (unit: meters)
+    uint16_t h_accuracy;  //< Horizontal position accuracy estimate (unit: mm)
+    uint16_t v_accuracy;  //< Vertical position accuracy estimate (unit: mm)
+    uint8_t n_sats;       //< Number of satellites used in solution
+    uint8_t flags;        //< Status flags
+}; // 34 bytes
+
+// we can't use boost circular buffer so a quick little fixed 
+// size implementation
+class GPS_BUFFER
+{
+public:
+    GPS_BUFFER();
+
+    bool push_back(const struct sbp_pos_llh_t* data);
+    bool get_recent(struct sbp_pos_llh_t* data) const;
+    bool lookup_interpolate(const uint32_t target_tow, struct sbp_pos_llh_t* data) const;
+protected:
+    size_t _cur_ii; // points to where we are adding
+    size_t _size;
+    struct sbp_pos_llh_t _buffer[GPS_BUFFER_MAX_SIZE];
+
+    bool get_recent(size_t* last_ii) const;
+    bool decrement_wrap(size_t* ii) const;
+    // no safety checks on this function
+    double interpolate(const uint32_t target_tow, const uint32_t tow_a, const double val_a, const uint32_t tow_b, const double val_b) const;
+};
+
 class AP_GPS_SBP : public AP_GPS_Backend
 {
 public:
@@ -111,18 +146,6 @@ private:
         uint16_t hdop;   //< Horizontal Dilution of Precision (unit: 0.01)
         uint16_t vdop;   //< Vertical Dilution of Precision (unit: 0.01)
     }; // 14 bytes
-
-    // Geodetic position solution.
-    struct PACKED sbp_pos_llh_t {
-        uint32_t tow;         //< GPS Time of Week (unit: ms)
-        double lat;           //< Latitude (unit: degrees)
-        double lon;           //< Longitude (unit: degrees)
-        double height;        //< Height (unit: meters)
-        uint16_t h_accuracy;  //< Horizontal position accuracy estimate (unit: mm)
-        uint16_t v_accuracy;  //< Vertical position accuracy estimate (unit: mm)
-        uint8_t n_sats;       //< Number of satellites used in solution
-        uint8_t flags;        //< Status flags
-    }; // 34 bytes
 
     // Velocity in NED Velocity in local North East Down (NED) coordinates.
     struct PACKED sbp_vel_ned_t {

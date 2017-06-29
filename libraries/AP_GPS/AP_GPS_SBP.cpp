@@ -49,6 +49,156 @@ do {                                            \
  # define Debug(fmt, args ...)
 #endif
 
+GPS_BUFFER::GPS_BUFFER()
+    : _cur_ii(0),
+      _size(0),
+      _buffer()
+{
+
+}
+bool GPS_BUFFER::get_recent(struct sbp_pos_llh_t* data) const
+{
+    size_t last_ii = 0;
+    if (data && get_recent(&last_ii))
+    {
+        *data = _buffer[last_ii];
+
+        return true;
+    }
+    else
+    {
+        return false;
+    }
+}
+
+bool GPS_BUFFER::get_recent(size_t* last_ii) const
+{
+    if (_size > 0)
+    {
+        *last_ii = _cur_ii - 1;
+        if (_cur_ii == 0)
+        {
+            *last_ii = _size - 1;
+        }
+
+        return true;
+    }
+    else
+    {
+        return false;
+    }
+}
+
+bool GPS_BUFFER::decrement_wrap(size_t* ii) const
+{
+    if (ii && (*ii < _size))
+    {
+        if (*ii > 0)
+        {
+            --(*ii);
+        }
+        else
+        {
+            *ii = _size - 1;
+        }
+        return true;
+    }
+    return false;
+}
+
+// interpolate to get the position
+bool GPS_BUFFER::lookup_interpolate(const uint32_t target_tow, struct sbp_pos_llh_t* data) const
+{
+    // initialize to the most recent element
+    size_t next_ii = 0;
+    if (!get_recent(&next_ii))
+    {
+        return false;
+    }
+
+    // initialize to the 2nd most recent element
+    size_t prev_ii = next_ii;
+    if (!decrement_wrap(&prev_ii))
+    {
+        return false;
+    }
+
+    size_t cnt = 0;
+    while (cnt < _size)
+    {
+        if ((_buffer[prev_ii].tow <= target_tow) && (_buffer[next_ii].tow >= target_tow))
+        {
+            break;
+        }
+
+        if (!decrement_wrap(&prev_ii) || !decrement_wrap(&next_ii))
+        {
+            return false;
+        }
+
+        ++cnt;
+    }
+
+    // we don't have bracketing elements for interpolation
+    if (cnt >= _size)
+    {
+        return false;
+    }
+
+    // TODO now interpolate between the two
+    if (_buffer[prev_ii].tow == target_tow)
+    {
+        *data = _buffer[prev_ii];
+    }
+    else if (_buffer[next_ii].tow == target_tow)
+    {
+        *data = _buffer[next_ii];
+    }
+    else if (_buffer[next_ii].tow > _buffer[prev_ii].tow)
+    {
+        // note we only actually interpolate lat, lon, and height
+        data->tow = target_tow;
+        data->lat = interpolate(target_tow, _buffer[prev_ii].tow, _buffer[prev_ii].lat, _buffer[next_ii].tow, _buffer[next_ii].lat);
+        data->lon = interpolate(target_tow, _buffer[prev_ii].tow, _buffer[prev_ii].lon, _buffer[next_ii].tow, _buffer[next_ii].lon);
+        data->height = interpolate(target_tow, _buffer[prev_ii].tow, _buffer[prev_ii].height, _buffer[next_ii].tow, _buffer[next_ii].height);
+    }
+    else
+    {
+        return false; // something went wrong, the times of week should be different
+    }
+
+    return true;
+}
+
+double GPS_BUFFER::interpolate(const uint32_t target_tow, const uint32_t tow_a, const double val_a, const uint32_t tow_b, const double val_b) const
+{
+    return val_a + ((val_b - val_a) / ((double) (tow_b - tow_a))) * ((double) (target_tow - tow_a));
+}
+
+bool GPS_BUFFER::push_back(const struct sbp_pos_llh_t* data)
+{
+    if (data)
+    {
+        _buffer[_cur_ii] = *data;
+
+        if (_size < GPS_BUFFER_MAX_SIZE)
+        {
+            ++_size;
+        }
+
+        ++_cur_ii;
+        if (_cur_ii == GPS_BUFFER_MAX_SIZE)
+        {
+            _cur_ii = 0;
+        }
+        return true;
+    }
+    else
+    {
+        return false;
+    }
+}
+
 AP_GPS_SBP::AP_GPS_SBP(AP_GPS &_gps, AP_GPS::GPS_State &_state,
                        AP_HAL::UARTDriver *_port) :
     AP_GPS_Backend(_gps, _state, _port),
